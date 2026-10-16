@@ -9,6 +9,7 @@
 extern "C" {
 #endif
 
+
 typedef struct {
     i2s_port_t port;
     gpio_num_t bclk_io_num;
@@ -24,6 +25,7 @@ void inmp441_i2s_get_default_config(inmp441_i2s_config_t *config);
 esp_err_t inmp441_i2s_init(const inmp441_i2s_config_t *config, i2s_chan_handle_t *rx_handle);
 esp_err_t inmp441_i2s_deinit(i2s_chan_handle_t rx_handle);
 esp_err_t inmp441_i2s_read(i2s_chan_handle_t rx_handle, void *data, size_t size, size_t *bytes_read, TickType_t ticks_to_wait);
+void inmp441_audio_capture_task(void *arg);
 #ifdef __cplusplus
 }
 #endif

@@ -5,6 +5,88 @@
 #include "esp_log.h"
 
 static const char *TAG = "inmp441_i2s";
+#define RING_BUFFER_SIZE 4096 // ogni slot sono 2 byte: 8KiB, ~256ms a 16kHz
+#define TEST_ITERATIONS 10000
+#define DUMP_EDGE_SAMPLES 64
+#define DUMP_YIELD_EVERY 16
+int16_t ring_buffer[RING_BUFFER_SIZE];
+int32_t ring_buffer_head = 0;
+int32_t ring_buffer_tail = 0;
+
+void ring_buffer_write(int16_t sample) {
+    ring_buffer[ring_buffer_head] = sample;
+    ring_buffer_head = (ring_buffer_head + 1) % RING_BUFFER_SIZE;
+    if (ring_buffer_head == ring_buffer_tail) {
+        // Buffer overflow, move the tail forward to overwrite the oldest sample
+        ring_buffer_tail = (ring_buffer_tail + 1) % RING_BUFFER_SIZE;
+    }
+}
+
+void ring_buffer_read(int16_t *sample) {
+    if (ring_buffer_head == ring_buffer_tail) {
+        // Buffer is empty
+        *sample = 0;
+        return;
+    }
+    *sample = ring_buffer[ring_buffer_tail];
+    ring_buffer_tail = (ring_buffer_tail + 1) % RING_BUFFER_SIZE;
+}
+
+void ring_buffer_dump(void) {
+    int32_t total_samples;
+    int32_t idx = ring_buffer_tail;
+    int32_t printed = 0;
+
+    if (ring_buffer_head >= ring_buffer_tail) {
+        total_samples = ring_buffer_head - ring_buffer_tail;
+    } else {
+        total_samples = (RING_BUFFER_SIZE - ring_buffer_tail) + ring_buffer_head;
+    }
+
+    ESP_LOGI(TAG, "Ring buffer summary: samples=%ld, head=%ld, tail=%ld",
+             (long)total_samples, (long)ring_buffer_head, (long)ring_buffer_tail);
+
+    if (total_samples == 0) {
+        ESP_LOGI(TAG, "Ring buffer is empty");
+        return;
+    }
+
+    if (total_samples <= (2 * DUMP_EDGE_SAMPLES)) {
+        while (idx != ring_buffer_head) {
+            ESP_LOGI(TAG, "ring_buffer[%ld] = %d", (long)idx, (int)ring_buffer[idx]);
+            idx = (idx + 1) % RING_BUFFER_SIZE;
+            printed++;
+            if ((printed % DUMP_YIELD_EVERY) == 0) {
+                vTaskDelay(1);
+            }
+        }
+        ESP_LOGI(TAG, "Ring buffer dump completed: printed=%ld", (long)printed);
+        return;
+    }
+
+    ESP_LOGI(TAG, "Printing first %d and last %d samples", DUMP_EDGE_SAMPLES, DUMP_EDGE_SAMPLES);
+
+    for (int32_t i = 0; i < DUMP_EDGE_SAMPLES; i++) {
+        ESP_LOGI(TAG, "ring_buffer[%ld] = %d", (long)idx, (int)ring_buffer[idx]);
+        idx = (idx + 1) % RING_BUFFER_SIZE;
+        printed++;
+        if ((printed % DUMP_YIELD_EVERY) == 0) {
+            vTaskDelay(1);
+        }
+    }
+
+    idx = (ring_buffer_head - DUMP_EDGE_SAMPLES + RING_BUFFER_SIZE) % RING_BUFFER_SIZE;
+    for (int32_t i = 0; i < DUMP_EDGE_SAMPLES; i++) {
+        ESP_LOGI(TAG, "ring_buffer[%ld] = %d", (long)idx, (int)ring_buffer[idx]);
+        idx = (idx + 1) % RING_BUFFER_SIZE;
+        printed++;
+        if ((printed % DUMP_YIELD_EVERY) == 0) {
+            vTaskDelay(1);
+        }
+    }
+
+    ESP_LOGI(TAG, "Ring buffer dump completed: printed=%ld of %ld", (long)printed, (long)total_samples);
+}
 
 void inmp441_i2s_get_default_config(inmp441_i2s_config_t *config)
 {
@@ -95,11 +177,38 @@ esp_err_t inmp441_i2s_deinit(i2s_chan_handle_t rx_handle)
     return i2s_del_channel(rx_handle);
 }
 
-esp_err_t inmp441_i2s_read(i2s_chan_handle_t rx_handle, void *data, size_t size, size_t *bytes_read, TickType_t ticks_to_wait)
+
+void inmp441_audio_capture_task(void *arg)
 {
-    if (rx_handle == NULL || data == NULL || bytes_read == NULL) {
-        return ESP_ERR_INVALID_ARG;
+    (void)arg;
+
+    inmp441_i2s_config_t i2s_config;
+    inmp441_i2s_get_default_config(&i2s_config);
+
+    i2s_chan_handle_t rx_handle = NULL;
+    esp_err_t ret = inmp441_i2s_init(&i2s_config, &rx_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize INMP441 I2S: %s", esp_err_to_name(ret));
+        vTaskDelete(NULL);
+        return;
     }
 
-    return i2s_channel_read(rx_handle, data, size, bytes_read, ticks_to_wait);
+    ESP_LOGI(TAG, "inmp441_audio_capture_task started");
+
+    int32_t raw_sample;
+    // Flush ring buffer state before new capture.
+    ring_buffer_head = 0;
+    ring_buffer_tail = 0;
+
+    for (;;) {
+        if (i2s_channel_read(rx_handle, &raw_sample, sizeof(raw_sample), NULL, portMAX_DELAY) == ESP_OK) {
+            // INMP441: 24-bit data left-justified in 32-bit word → shift right 16 for signed PCM16
+            int16_t pcm16 = (int16_t)(raw_sample >> 16);
+            ring_buffer_write(pcm16);
+        }
+    }
+
+    // Unreachable in current skeleton, kept for future stop path.
+    (void)inmp441_i2s_deinit(rx_handle);
+    vTaskDelete(NULL);
 }

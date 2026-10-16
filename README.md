@@ -1,89 +1,221 @@
-| Supported Targets | ESP32 | ESP32-C2 | ESP32-C3 | ESP32-C5 | ESP32-C6 | ESP32-C61 | ESP32-P4 | ESP32-S2 | ESP32-S3 |
-| ----------------- | ----- | -------- | -------- | -------- | -------- | --------- | -------- | -------- | -------- |
+# TelephoneAI
 
-# HTTPS Request Example
+## INMP441 Microphone Library
 
-Uses APIs from `esp-tls` component to make a very simple HTTPS request over a secure connection, including verifying the server TLS certificate.
+This document specifies the INMP441 digital MEMS microphone interface and a proposed acquisition library for ESP32 with ESP-IDF. Hardware specifications are taken from **InvenSense INMP441 Datasheet DS-INMP441-00, Rev. 1.1 (2014)**. Software architecture and defaults are design recommendations, not capabilities guaranteed by the microphone.
 
-(See the README.md file in the upper level 'examples' directory for more information about examples.)
+### 1. I2S communication
 
-### Session Tickets
+| Property | Specification |
+|---|---|
+| Interface | Standard Philips I2S |
+| Microphone role | Slave; ESP32 supplies clocks |
+| Audio sample resolution | 24 bits |
+| Representation | Signed two's complement PCM |
+| Bit order | MSB first |
+| Word slot | 32 SCK cycles |
+| Stereo frame | 64 SCK cycles (left + right) |
+| Data alignment | First data bit one SCK cycle after WS transition |
+| Channel selection | L/R pin selects left or right |
+| Output when inactive | SD is high impedance (tri-state) |
 
-Session Tickets, specified in [RFC 5077](https://datatracker.ietf.org/doc/html/rfc5077) are a mechanism to distribute encrypted
-session-state information to the client in the form of a ticket and a mechanism to present the ticket back to the server.  The ticket is created by a TLS server and sent to a TLS client.  The TLS client presents the ticket to the TLS server to resume a session. In TLS 1.2, this speeds up handshakes from two to one round-trip.
+One INMP441 provides **mono** audio in one of the two I2S slots. Two microphones can share SCK, WS, and SD when assigned opposite channels. The SD line should have a 100 kΩ pull-down. The unused part of a slot is **not guaranteed to be zero**.
 
-In ESP-IDF, this feature is supported (for both server and client) when mbedTLS is used as the SSL library.
-
-## How to use example
-Before project configuration and build, be sure to set the correct chip target using `idf.py set-target <chip_name>`.
-
-### Hardware Required
-
-* A development board with ESP32/ESP32-S2/ESP32-C3 SoC (e.g., ESP32-DevKitC, ESP-WROVER-KIT, etc.)
-* A USB cable for power supply and programming
-
-### Configure the project
-
-```
-idf.py menuconfig
-```
-Open the project configuration menu (`idf.py menuconfig`) to configure Wi-Fi or Ethernet. See "Establishing Wi-Fi or Ethernet Connection" section in [examples/protocols/README.md](../../README.md) for more details.
-
-#### Configuring Client Session Tickets
-
-Note: This example has client session tickets enabled by default.
-
-* Open the project configuration menu (`idf.py menuconfig`)
-* In the `Component Config` -> `ESP-TLS` submenu, select the `Enable client session tickets` option.
-
-Ensure that the server has the session tickets feature enabled.
-
-### Build and Flash
-
-Build the project and flash it to the board, then run monitor tool to view serial output:
-
-```
-idf.py -p PORT flash monitor
+```text
+                    One stereo frame: 64 SCK cycles
+        +---------------------------+---------------------------+
+WS      |       LOW / LEFT          |       HIGH / RIGHT        |
+        +---------------------------+---------------------------+
+SCK     |        32 cycles          |         32 cycles         |
+SD      | 1-cycle delay, 24 data bits, remaining clocks / Hi-Z |
 ```
 
-(Replace PORT with the name of the serial port to use.)
+### 2. Clock and timing
 
-(To exit the serial monitor, type ``Ctrl-]``.)
+The microphone requires **64 SCK cycles per WS frame**:
 
-See the Getting Started Guide for full steps to configure and use ESP-IDF to build projects.
+`f_SCK = 64 × f_s`
 
-## Example Output
+| Timing parameter | Datasheet value |
+|---|---|
+| WS/sample frequency | 7.8–50 kHz |
+| SCK frequency | 0.5–3.2 MHz |
+| Minimum SCK high time | 50 ns |
+| Minimum SCK low time | 50 ns |
+| Minimum SCK period | 312 ns |
+| Minimum WS setup | 0 ns |
+| Minimum WS hold | 20 ns |
 
+| Sample rate | SCK frequency |
+|---:|---:|
+| 8 kHz | 512 kHz |
+| 16 kHz | 1.024 MHz |
+| 24 kHz | 1.536 MHz |
+| 32 kHz | 2.048 MHz |
+| 44.1 kHz | 2.8224 MHz |
+| 48 kHz | 3.072 MHz |
+
+**TelephoneAI default recommendation:** 16 kHz mono for speech capture. This is an application choice; any downstream audio API must be configured to accept the actual rate and encoding.
+
+### 3. Channel selection
+
+| L/R | I2S channel | WS during data |
+|---|---|---|
+| LOW | Left | LOW |
+| HIGH | Right | HIGH |
+
+Configure ESP-IDF I2S RX to receive the selected channel. Confirm channel order and packing with the specific ESP-IDF version and ESP32 target.
+
+### 4. Audio samples and conversion
+
+Each valid sample is a 24-bit signed integer in two's complement:
+
+`-8,388,608 <= sample <= 8,388,607`
+
+The microphone outputs sample **amplitude**, not encoded sound files. To reconstruct audio, preserve the sample order and the sampling frequency.
+
+If a correctly decoded signed 24-bit value is available in `int32_t pcm24`, a simple truncating PCM16 conversion is:
+
+```c
+int16_t pcm16 = (int16_t)(pcm24 >> 8);
 ```
-I (5634) example_connect: - IPv4 address: 192.168.194.219
-I (5634) example_connect: - IPv6 address: fe80:0000:0000:0000:266f:28ff:fe80:2c74, type: ESP_IP6_ADDR_IS_LINK_LOCAL
-I (5644) example: Start https_request example
-I (5654) example: https_request using crt bundle
-W (6514) wifi:<ba-add>idx:1 (ifx:0, ee:6d:19:60:f6:0e), tid:4, ssn:0, winSize:64
-I (7074) esp-x509-crt-bundle: Certificate validated
-I (9384) example: Connection established...
-I (9384) example: 107 bytes written
-I (9384) example: Reading HTTP response...
-HTTP/1.1 200 OK
-Content-Length: 2091
-Access-Control-Allow-Origin: *
-Connection: close
-Content-Type: application/json
-Date: Tue, 07 Sep 2021 08:30:00 GMT
-Strict-Transport-Security: max-age=631138519; includeSubdomains; preload
 
-{"given_cipher_suites":["TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384","TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384","TLS_DHE_RSA_WITH_AES_256_GCM_SHA384","TLS_ECDHE_ECDSA_WITH_AES_256_CCM","TLS_DHE_RSA_WITH_AES_256_CCM","TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384","TLS_ECDHE_RSA_WITH_AES_
-256_CBC_SHA384","TLS_DHE_RSA_WITH_AES_256_CBC_SHA256","TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA","TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA","TLS_DHE_RSA_WITH_AES_256_CBC_SHA","TLS_ECDHE_ECDSA_WITH_AES_256_CCM_8","TLS_DHE_RSA_WITH_AES_256_CCM_8","TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256","TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256","TLS_DHE_RSA_WITH_AES_128_GCM_SHA256","TLS_ECDHE_ECDSA_WITH_AES_128_CCM","TLS_DHE_RSA_WITH_AES_128_CCM","TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256","TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256","TLS_DHE
-_RSA_WITH_AES_128_CBC_SHA256","TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA","TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA","TLS_DHE_RSA_WITH_AES_128_CBC_SHA","TLS_ECDHE_ECDSA
-_WITH_AES_128_CCM_8","TLS_DHE_RSA_WITH_AES_128_CCM_8","TLS_RSA_WITH_AES_256_GCM_SHA384","TLS_RSA_WITH_AES_256_CCM","TLS_RSA_WITH_AES_256_CBC_SHA256","TLS_RSA_WITH_AES_256_CBC_SHA","TLS_ECDH_RSA_WITH_AES_256_GCM_SHA384","TLS_ECDH_RSA_WITH_AES_256_CBC_SHA384","TLS_ECDH_RSA_WITH_AES_256_CBC_SHA","TLS_ECDH_ECDSA_WITH_AES_256_GCM_SHA384","TLS_ECDH_ECDSA_WITH_AES_256_CBC_SHA384","TLS_ECDH_ECDSA_WITH_AES_256_CBC_SHA","TLS_RSA_WITH_AES_256_CCM_8","TLS_RSA_WITH_AES_128_GCM_SHA256","TLS_RSA_WITH_AES_128_CCM","TLS_RS
-A_WITH_AES_128_CBC_SHA256","TLS_RSA_WITH_AES_128_CBC_SHA","TLS_ECDH_RSA_WITH_AES_128_GCM_SHA256","TLS_ECDH_RSA_WITH_AES_128_CBC_SHA256","TLS_ECDH_RSA_WITH_AES_128_CBC_SHA","TLS_ECDH_ECDSA_WITH_AES_128_GCM_SHA256","TLS_ECDH_ECDSA_WITH_AES_128_CBC_SHA256","TLS_ECDH_ECDSA_WITH_AES_128_CBC_SHA","TLS_RSA_WITH_AES_128_CCM_8","TLS_EMPTY_RENEGOTIATION_INFO_SCSV"],"ephemeral_keys_supported":true,"session_ticket_supported":true,"tls_compression_supported":false,"unknown_cipher_suite_supported":false,"beast_vuln":fal
-se,"able_to_detect_n_minus_one_splitting":false,"insecure_cipher_suites":{},"tls_version":"TLS 1.2","rating":"Probably Okay"}
-I (10204) example: connection closed
-I (10204) example: 10...
-I (11204) example: 9...
-I (12204) example: 8...
-I (13204) example: 7...
-I (14204) example: 6...
-I (15204) example: 5...
-I (16204) example: 4...
+If the I2S driver returns a **left-aligned** 24-bit value in a signed 32-bit container, first decode it with an arithmetic right shift of 8 bits. **Do not assume** this layout without checking the driver configuration and a capture. The I2S bit order (MSB first) and PCM16 byte order (typically little-endian in WAV and many streaming formats) are different concepts.
+
+### 5. Hardware connections
+
+| INMP441 pin | Signal | Purpose |
+|---:|---|---|
+| 1 | SCK | I2S serial clock input |
+| 2 | SD | I2S data output |
+| 3 | WS | I2S word select input |
+| 4 | L/R | Channel selection |
+| 5, 6, 9 | GND | Ground |
+| 7 | VDD | Power |
+| 8 | CHIPEN | Enable: HIGH = normal operation, LOW = power-down |
+
+- Supply: **1.8–3.3 V** (recommended operating range); absolute maximum **3.63 V**.
+- Place a **100 nF** decoupling capacitor close to VDD/GND.
+- Use a **100 kΩ** pull-down on SD, especially with shared SD lines.
+- Avoid driving active SCK/WS clocks continuously when the microphone is unpowered.
+- Allow startup settling: the datasheet gives approximately **85 ms** after initial power-up with SCK at 3.072 MHz. Initial output samples can be zero.
+
+### 6. Acoustic specifications
+
+| Property | Datasheet value |
+|---|---|
+| Directivity | Omnidirectional |
+| Frequency response (-3 dB points) | 60 Hz–15 kHz |
+| Typical sensitivity | -26 dBFS at 1 kHz / 94 dB SPL |
+| SNR | 61 dBA |
+| Dynamic range | 87 dB |
+| Maximum acoustic input | 120 dB SPL peak |
+| ADC | Internal sigma-delta |
+| Digital filtering | Internal high-pass and low-pass |
+| Low-pass passband | Approximately `0.423 × f_s` |
+
+At `f_s = 16 kHz`, the digital low-pass passband extends to about **6.77 kHz**.
+
+### 7. Proposed ESP-IDF configuration
+
+These values describe a **recommended implementation**, not fixed sensor requirements.
+
+| Setting | Suggested value |
+|---|---|
+| Peripheral | ESP32 I2S RX |
+| Clock master | ESP32 |
+| Protocol | Philips I2S |
+| Sampling rate | 16,000 Hz |
+| Sensor sample width | 24-bit signed |
+| Slot width | 32 bits |
+| Channel | Mono, matching L/R |
+| Acquisition | I2S driver + DMA |
+| Application representation | PCM16 signed mono, optionally PCM24 |
+| PCM16 serialization | Little-endian |
+| Buffering | Configurable ring buffer |
+| Overflow behavior | Explicitly selected and counted |
+
+Verify ESP-IDF I2S slot settings, mono packing, and DMA layout for the exact chip and ESP-IDF version before implementing sample extraction.
+
+### 8. Library architecture
+
+```text
+INMP441
+   |  I2S: 24-bit samples in 32-clock slots
+   v
+ESP32 I2S RX + DMA
+   |
+   v
+24-bit decoding / sign extension
+   |
+   v
+Optional PCM24 -> PCM16 conversion
+   |
+   v
+Ring buffer
+   |                     |
+   v                     v
+WAV recording        Streaming component
+                         |
+                         v
+                  WebSocket / audio server
 ```
+
+Keep WebSocket transport and GPT-specific protocols **outside** the INMP441 driver. The driver should expose audio samples to independent consumers.
+
+#### Proposed API (not yet implemented)
+
+```c
+esp_err_t inmp441_init(const inmp441_config_t *config);
+esp_err_t inmp441_start(void);
+esp_err_t inmp441_read(int16_t *samples, size_t max_samples,
+                       size_t *samples_read, uint32_t timeout_ms);
+esp_err_t inmp441_stop(void);
+esp_err_t inmp441_deinit(void);
+```
+
+#### Implementation checklist
+
+1. Initialize GPIO, I2S RX, sample clock, and channel selection.
+2. Configure DMA and allocate receive buffers.
+3. Start capture and account for microphone startup time.
+4. Read complete slots and verify bit alignment/sign extension.
+5. Convert to PCM16 if requested by the consumer.
+6. Write samples to a bounded ring buffer.
+7. Expose blocking/timed reads and the number of samples actually returned.
+8. Synchronize producer/consumer access across FreeRTOS tasks.
+9. Count overruns, dropped samples, timeouts, and driver errors.
+10. Stop and release DMA, I2S, tasks, and buffers cleanly.
+
+### 9. Buffer sizing
+
+For **16 kHz mono PCM16**:
+
+`16,000 samples/s × 2 bytes/sample = 32,000 bytes/s = 256 kbit/s`
+
+| Buffer | Approximate duration |
+|---:|---:|
+| 512 B | 16 ms |
+| 1,024 B | 32 ms |
+| 2,048 B | 64 ms |
+| 4,096 B | 128 ms |
+| 8,192 B | 256 ms |
+| 16,384 B | 512 ms |
+
+If retaining one 32-bit container per mono sample instead, the rate is **64,000 bytes/s**, and a 16 KiB buffer holds about **256 ms**. Full stereo-frame storage doubles that rate; actual storage depends on ESP-IDF DMA packing.
+
+### 10. Validation
+
+1. Record at 16 kHz, using the configured mono channel.
+2. Inspect sample values, signs, and whether the expected channel contains audio.
+3. Confirm that no extra padding bits are interpreted as signal.
+4. Convert correctly decoded samples to PCM16.
+5. Save a WAV file with a matching header (sample rate, mono, 16-bit PCM).
+6. Listen for clipping, distortion, incorrect speed, and discontinuities.
+7. Run long-duration capture and monitor buffer overruns and DMA errors.
+
+### Datasheet reference
+
+**InvenSense, INMP441: Omnidirectional Microphone with Bottom Port and I2S Digital Output**, document **DS-INMP441-00**, revision **1.1**, dated **2014-05-21**.
+
+Relevant pages: **4–5** electrical/timing; **8** pinout; **10** startup/power; **11–12** I2S data format and channel timing; **13** internal filters.
